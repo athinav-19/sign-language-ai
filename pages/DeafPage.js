@@ -1,0 +1,533 @@
+// Deaf Person Interface View (3-Section Balanced Viewport)
+import { renderSidebar } from '../components/Sidebar.js';
+import { renderLiveCamera } from '../components/LiveCamera.js';
+import { renderSignTranscript } from '../components/SignTranscript.js';
+import { renderSignAnimation, SignAnimationViewer } from '../components/SignAnimation.js';
+import { MODE_LABELS } from '../services/signAnimation/signConfig.js';
+import { renderChatPanel } from '../components/ChatPanel.js';
+import { cameraService } from '../services/cameraService.js';
+import { signRecognitionService } from '../services/signRecognitionService.js';
+import { signAnimationService } from '../services/signAnimationService.js';
+import { conversationStore } from '../state/conversationStore.js';
+import { communicationService } from '../services/communicationService.js';
+import { handTrackingDebugService } from '../services/handTrackingDebugService.js';
+import { landmarkPipelineService } from '../services/landmarkPipelineService.js';
+import { hospitalConversationService } from '../services/conversation/hospitalConversationService.js';
+
+export function renderDeafPage() {
+  const conversation = conversationStore.getConversation();
+  const animState = signAnimationService.getState();
+  const hospState = hospitalConversationService.getState();
+  const transcript = hospState.currentPhrase || signRecognitionService.getTranscript() || 'Hello, I need help.';
+  const rawSign = hospState.currentSign || signRecognitionService.getRawSign() || '—';
+
+  return `
+    <div class="h-screen w-full flex bg-surface font-body text-on-surface antialiased overflow-hidden">
+      <!-- Reusable Left Sidebar -->
+      ${renderSidebar('#/deaf')}
+
+      <!-- Main Three-Panel Viewport (Maximized Full Viewport Height) -->
+      <main class="flex-1 h-full overflow-y-auto lg:overflow-hidden p-3.5 lg:p-4 bg-surface flex flex-col min-w-0 min-h-0">
+        <!-- 3-Panel Split View Extending to Top -->
+        <div class="w-full flex-1 flex flex-col lg:flex-row gap-3.5 lg:gap-4 min-h-0 h-full">
+          <!-- SECTION 1 (LEFT): ENLARGED LIVE VIDEO & SIGN-TO-TEXT TRANSCRIPT -->
+          <section class="flex-[1.2] lg:w-[38%] min-w-0 min-h-0 flex flex-col h-full bg-surface-container-lowest rounded-2xl p-3.5 lg:p-4 shadow-sm border border-outline-variant/30 overflow-hidden">
+            ${renderLiveCamera({
+              isDeafView: true,
+              title: 'Camera',
+              isTurnActive: animState.cameraResponseComplete,
+              turnStatus: animState.cameraResponseComplete ? 'Your Turn' : 'Ready'
+            })}
+            ${renderSignTranscript(
+              transcript,
+              'deaf-live-transcript',
+              signRecognitionService.getStatusText() || 'Recognition: Ready',
+              'deaf-recognition-status',
+              rawSign,
+              'Hospital First-Visit'
+            )}
+          </section>
+
+          <!-- SECTION 2 (CENTER): ANIMATED SIGN REPLY (AUTOMATIC 2X PLAYBACK) -->
+          <section class="flex-1 lg:w-[31%] min-w-0 min-h-0 flex flex-col h-full bg-[#F3F4F6] rounded-2xl p-3.5 lg:p-4 shadow-sm border border-outline-variant/30 overflow-hidden">
+            ${renderSignAnimation(animState)}
+          </section>
+
+          <!-- SECTION 3 (RIGHT): CONVERSATION (CHAT STREAM) -->
+          <section class="flex-1 lg:w-[31%] min-w-0 min-h-0 flex flex-col h-full bg-surface-container-lowest rounded-2xl p-3.5 lg:p-4 shadow-sm border border-outline-variant/30 overflow-hidden">
+            ${renderChatPanel({
+              conversation: conversation,
+              isDeafView: true
+            })}
+          </section>
+        </div>
+      </main>
+    </div>
+  `;
+}
+
+export function initDeafPage() {
+  console.log('[CAMERA STOP TRACE] DeafPage component mount', {
+    currentRoute: typeof window !== 'undefined' ? window.location.hash : 'unknown',
+    currentCameraState: cameraService.status,
+    timestamp: new Date().toISOString()
+  });
+
+  // Connect to cross-device WebSocket relay as 'deaf' peer in room 'desk_04'
+  communicationService.connect('desk_04', 'deaf');
+
+  const videoEl = document.getElementById('deaf-camera-video');
+  const permissionBanner = document.getElementById('camera-permission-banner');
+  const cameraErrorMessage = document.getElementById('camera-error-message');
+  const btnRequestPermission = document.getElementById('btn-request-permission');
+
+  const cameraContainer = document.getElementById('deaf-camera-container');
+  const turnBadge = document.getElementById('deaf-turn-badge');
+  const turnIndicatorDot = document.getElementById('turn-indicator-dot');
+  const turnStatusText = document.getElementById('turn-status-text');
+
+  // Visual helper for Green Camera Turn-Taking state (Subtle border/glow ONLY on 2x response completion)
+  // THE REAL LIVE CAMERA FEED REMAINS 100% VISIBLE AT ALL TIMES
+  function applyGreenCameraState(active) {
+    if (active) {
+      if (cameraContainer) {
+        cameraContainer.classList.add('camera-turn-active');
+        cameraContainer.classList.remove('border-outline-variant/30');
+      }
+      if (turnBadge) {
+        turnBadge.className = 'transition-all duration-300 flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-100 text-emerald-900 border border-emerald-300 font-bold text-xs uppercase tracking-wider shadow-sm';
+      }
+      if (turnIndicatorDot) {
+        turnIndicatorDot.className = 'w-2.5 h-2.5 rounded-full bg-emerald-500 animate-ping';
+      }
+      if (turnStatusText) {
+        turnStatusText.textContent = 'Your Turn';
+      }
+    } else {
+      if (cameraContainer) {
+        cameraContainer.classList.remove('camera-turn-active');
+        cameraContainer.classList.add('border-outline-variant/30');
+      }
+      if (turnBadge) {
+        turnBadge.className = 'transition-all duration-300 flex items-center gap-1.5 px-3 py-1 rounded-full bg-surface-container text-on-surface-variant font-bold text-xs uppercase tracking-wider';
+      }
+      if (turnIndicatorDot) {
+        turnIndicatorDot.className = 'w-2 h-2 rounded-full bg-outline-variant';
+      }
+      if (turnStatusText) {
+        turnStatusText.textContent = 'Ready';
+      }
+    }
+  }
+
+  const btnStartCamera = document.getElementById('btn-start-camera');
+  const btnStopCamera = document.getElementById('btn-stop-camera');
+  const cameraStoppedOverlay = document.getElementById('camera-stopped-overlay');
+
+
+
+  // START CAMERA: Request camera permission & stream live feed
+  async function startLiveCamera() {
+    if (!videoEl) return;
+    const res = await cameraService.startCamera(videoEl);
+    if (res.success) {
+      if (cameraStoppedOverlay) cameraStoppedOverlay.classList.add('hidden');
+      if (permissionBanner) permissionBanner.classList.add('hidden');
+
+      // Reset live camera prediction overlay on camera start
+      const camPredText = document.getElementById('live-camera-prediction-text');
+      const camPredDot = document.getElementById('live-camera-prediction-dot');
+      if (camPredText) camPredText.textContent = 'Detecting...';
+      if (camPredDot) camPredDot.className = 'w-2 h-2 rounded-full bg-cyan-400 animate-pulse';
+
+      // PHASE 1 & 2: Attach Hand Tracking & Feature Pipeline Debugger to existing live webcam
+      const canvasEl = document.getElementById('hand-tracking-canvas');
+      handTrackingDebugService.attach(videoEl, canvasEl);
+
+      // PHASE 6: Enable Real Continuous Sign Recognition (Webcam -> Landmarks -> 30x150 -> FastAPI -> Admin)
+      signRecognitionService.startRecognition(videoEl);
+    } else {
+      if (permissionBanner) {
+        permissionBanner.classList.remove('hidden');
+        if (cameraErrorMessage && res.error) {
+          cameraErrorMessage.textContent = res.error;
+        }
+      }
+    }
+  }
+
+  // STOP CAMERA: Stop all tracks, clear srcObject, stop MediaPipe processing, reset feature buffer, remove overlays
+  function stopLiveCamera(triggerSource = 'unknown') {
+    console.trace('[CAMERA STOP TRACE] stopLiveCamera invoked', {
+      triggerSource,
+      currentCameraState: cameraService.status,
+      currentRoute: typeof window !== 'undefined' ? window.location.hash : 'unknown',
+      timestamp: new Date().toISOString()
+    });
+    cameraService.stopCamera('user_clicked_stop_camera');
+    signRecognitionService.stopRecognition();
+    handTrackingDebugService.detach();
+    landmarkPipelineService.reset();
+    if (cameraStoppedOverlay) cameraStoppedOverlay.classList.remove('hidden');
+    const camPredText = document.getElementById('live-camera-prediction-text');
+    const camPredDot = document.getElementById('live-camera-prediction-dot');
+    if (camPredText) camPredText.textContent = 'Detecting...';
+    if (camPredDot) camPredDot.className = 'w-2 h-2 rounded-full bg-slate-500';
+  }
+
+  // Bind testing camera controls
+  if (btnStartCamera) {
+    btnStartCamera.addEventListener('click', (event) => {
+      console.log('[CAMERA STOP TRACE] Start Camera button clicked', {
+        eventType: event?.type,
+        eventTarget: event?.target ? `${event.target.tagName}#${event.target.id || ''}.${event.target.className || ''}` : null,
+        isTrusted: event?.isTrusted,
+        pointerType: event?.pointerType,
+        activeElement: document.activeElement ? `${document.activeElement.tagName}#${document.activeElement.id || ''}` : null,
+        currentCameraState: cameraService.status,
+        currentRoute: typeof window !== 'undefined' ? window.location.hash : 'unknown',
+        timestamp: new Date().toISOString()
+      });
+      startLiveCamera();
+    });
+  }
+
+  if (btnStopCamera) {
+    btnStopCamera.addEventListener('click', (event) => {
+      console.trace('[CAMERA STOP TRACE]', 'user_clicked_stop_camera', {
+        handlerFired: 'btnStopCamera.click',
+        eventType: event?.type,
+        eventTarget: event?.target ? `${event.target.tagName}#${event.target.id || ''}.${event.target.className || ''}` : null,
+        isTrusted: event?.isTrusted,
+        clientX: event?.clientX,
+        clientY: event?.clientY,
+        pointerType: event?.pointerType,
+        detail: event?.detail,
+        activeElement: document.activeElement ? `${document.activeElement.tagName}#${document.activeElement.id || ''}` : null,
+        currentCameraState: cameraService.status,
+        currentRoute: typeof window !== 'undefined' ? window.location.hash : 'unknown',
+        timestamp: new Date().toISOString()
+      });
+      stopLiveCamera('btnStopCamera_click');
+    });
+  }
+
+  // Retry permission if previously denied
+  if (btnRequestPermission) {
+    btnRequestPermission.addEventListener('click', () => {
+      startLiveCamera();
+    });
+  }
+
+  // Auto-scroll chat timeline to bottom
+  function scrollToBottom() {
+    const chatTimeline = document.getElementById('chat-stream-timeline');
+    if (chatTimeline) {
+      chatTimeline.scrollTop = chatTimeline.scrollHeight;
+    }
+  }
+
+  // Replay Button listener for sign animation
+  const replayBtn = document.getElementById('btn-replay-animation');
+  if (replayBtn) {
+    replayBtn.addEventListener('click', () => {
+      applyGreenCameraState(false);
+      signAnimationService.replay();
+    });
+  }
+
+  // 3D Sign Animation Avatar Viewport Mount (Three.js xbot.glb)
+  const canvasMount = document.getElementById('sign-viewer-canvas-mount');
+  let signViewerInstance = null;
+  if (canvasMount) {
+    try {
+      const curAnim = signAnimationService.getState();
+      signViewerInstance = new SignAnimationViewer({
+        text: curAnim.text || 'Hello',
+        mode: curAnim.mode || 'FINGERSPELLING',
+        autoPlay: false
+      });
+      signViewerInstance.mount(canvasMount);
+      signAnimationService.attachViewer(signViewerInstance);
+    } catch (err) {
+      console.warn('[DeafPage] SignAnimationViewer mount error, continuing gracefully:', err);
+    }
+  }
+
+  // Context Selector listener
+  const contextSelector = document.getElementById('context-selector');
+  if (contextSelector) {
+    contextSelector.addEventListener('change', (e) => {
+      hospitalConversationService.setContext(e.target.value);
+    });
+  }
+
+  // Hospital First-Visit Phrase Selection Control (Template Selector)
+  const hospitalPhraseSelect = document.getElementById('hospital-phrase-select');
+  const btnTriggerHospitalPhrase = document.getElementById('btn-trigger-hospital-phrase');
+
+  if (btnTriggerHospitalPhrase && hospitalPhraseSelect) {
+    btnTriggerHospitalPhrase.addEventListener('click', () => {
+      const phraseId = hospitalPhraseSelect.value;
+      if (phraseId) {
+        hospitalConversationService.selectPhraseById(phraseId);
+      }
+    });
+  }
+
+  // Quick Hospital First-Visit Phrase Action Pills
+  document.querySelectorAll('.btn-quick-hospital-phrase').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const phraseId = btn.getAttribute('data-phrase-id');
+      if (phraseId) {
+        if (hospitalPhraseSelect) hospitalPhraseSelect.value = phraseId;
+        hospitalConversationService.selectPhraseById(phraseId);
+      }
+    });
+  });
+
+  // Demo Reset Button
+  const resetDemoBtn = document.getElementById('btn-reset-demo');
+  if (resetDemoBtn) {
+    resetDemoBtn.addEventListener('click', () => {
+      conversationStore.resetDemo();
+      signRecognitionService.reset();
+      hospitalConversationService.reset();
+      signAnimationService.stop();
+      applyGreenCameraState(false);
+    });
+  }
+
+  // Subscribe to Sign Animation Lifecycle (3D Viewport Updates)
+  const unsubAnim = signAnimationService.subscribe((state) => {
+    const progressBar = document.getElementById('playback-progress');
+    const timeRemaining = document.getElementById('time-remaining');
+    const cycleLabel = document.getElementById('cycle-label');
+    const playbackBadge = document.getElementById('playback-badge');
+    const playbackStatusText = document.getElementById('playback-status-text');
+    const syncText = document.getElementById('sync-animation-text');
+    const activeModeBadge = document.getElementById('sign-active-mode-badge');
+    const modeSubcaption = document.getElementById('sign-mode-subcaption');
+    const syncModeLabel = document.getElementById('sync-mode-label');
+
+    const modeLabel = MODE_LABELS[state.mode] || state.mode || 'Fingerspelling';
+    if (activeModeBadge) activeModeBadge.textContent = modeLabel;
+    if (modeSubcaption) modeSubcaption.innerHTML = `Relay mode: <span class="font-bold text-primary">${modeLabel}</span>`;
+    if (syncModeLabel) syncModeLabel.textContent = modeLabel;
+
+    if (progressBar) progressBar.style.width = state.progressPercent + '%';
+    if (timeRemaining) timeRemaining.textContent = state.timeDisplay;
+    if (syncText) syncText.textContent = `"${state.text}"`;
+
+    if (state.completed) {
+      if (cycleLabel) cycleLabel.textContent = 'Completed';
+      if (playbackBadge) {
+        playbackBadge.className = 'flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-900 border border-emerald-300 text-xs font-bold uppercase tracking-wide';
+        playbackBadge.innerHTML = `
+          <span class="material-symbols-outlined text-[16px] text-emerald-700">check_circle</span>
+          <span>Complete</span>
+        `;
+      }
+      applyGreenCameraState(true);
+    } else if (state.isPlaying) {
+      if (cycleLabel) cycleLabel.textContent = 'Playing';
+      if (playbackBadge) {
+        playbackBadge.className = 'flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-primary-container text-secondary-container text-xs font-bold uppercase tracking-wide shadow-xs';
+        playbackBadge.innerHTML = `
+          <span class="w-2 h-2 rounded-full bg-secondary animate-ping"></span>
+          <span>Playing</span>
+        `;
+      }
+      applyGreenCameraState(false);
+    }
+  });
+
+  // Subscribe to Sign Recognition updates (progressive real-time text & status)
+  const unsubRecog = signRecognitionService.subscribe((recog) => {
+    const transcriptEl = document.getElementById('deaf-live-transcript');
+    if (transcriptEl && recog.transcript) {
+      transcriptEl.innerHTML = `"${recog.transcript}" <span class="inline-block w-2 h-5 bg-secondary ml-1 animate-pulse align-middle"></span>`;
+    }
+
+    // Update Live Camera Prediction Overlay Badge (Driven ONLY by real live ML callback)
+    const cameraPredText = document.getElementById('live-camera-prediction-text');
+    const cameraPredDot = document.getElementById('live-camera-prediction-dot');
+    if (cameraPredText && recog.livePredictionText) {
+      cameraPredText.textContent = recog.livePredictionText;
+      if (cameraPredDot) {
+        if (recog.livePredictionText.includes('Uncertain')) {
+          cameraPredDot.className = 'w-2 h-2 rounded-full bg-amber-400 animate-pulse';
+        } else if (recog.livePredictionText.includes('Detecting')) {
+          cameraPredDot.className = 'w-2 h-2 rounded-full bg-cyan-400 animate-pulse';
+        } else {
+          cameraPredDot.className = 'w-2 h-2 rounded-full bg-emerald-400';
+        }
+      }
+    }
+
+    const statusTextEl = document.getElementById('deaf-recognition-status');
+    const statusDotEl = document.getElementById('deaf-recognition-status-dot');
+    if (statusTextEl && recog.statusText) {
+      statusTextEl.textContent = recog.statusText;
+    }
+    if (statusDotEl && recog.statusCode) {
+      if (recog.statusCode === 'RECOGNIZING') {
+        statusDotEl.className = 'w-2 h-2 rounded-full bg-amber-500 animate-ping';
+      } else if (recog.statusCode === 'CONFIRMED') {
+        statusDotEl.className = 'w-2 h-2 rounded-full bg-emerald-500 animate-pulse';
+      } else if (recog.statusCode === 'UNCERTAIN') {
+        statusDotEl.className = 'w-2 h-2 rounded-full bg-amber-500';
+      } else {
+        statusDotEl.className = 'w-2 h-2 rounded-full bg-emerald-500';
+      }
+    }
+
+    const liveSigningIndicator = document.getElementById('live-signing-indicator');
+    const liveSigningText = document.getElementById('live-signing-text');
+    if (liveSigningIndicator && liveSigningText) {
+      if (recog.isRecognizing) {
+        liveSigningIndicator.classList.remove('hidden');
+        liveSigningText.textContent = `"${recog.transcript}"`;
+        scrollToBottom();
+      } else {
+        liveSigningIndicator.classList.add('hidden');
+      }
+    }
+  });
+
+  // Subscribe to Conversation Store updates
+  const unsubConv = conversationStore.subscribe((conversation) => {
+    const chatTimeline = document.getElementById('chat-stream-timeline');
+    if (chatTimeline) {
+      const messagesHtml = conversation.map(msg => {
+        const isAdmin = msg.sender === 'admin';
+        if (isAdmin) {
+          const activeStyle = msg.isActiveReply
+            ? 'bg-secondary/10 border-secondary/30 ring-1 ring-secondary/20'
+            : 'bg-surface-container-low border-outline-variant/50';
+          return `
+            <div class="flex flex-col gap-1 items-start w-full animate-fadeIn">
+              <div class="flex items-center gap-1.5 text-xs text-on-surface-variant pl-1">
+                <span class="material-symbols-outlined text-[15px] text-secondary">support_agent</span>
+                <span class="font-bold text-primary">${msg.senderName || 'Admin (Officer Vance)'}</span>
+                <span class="text-[10px] text-outline font-mono">${msg.time || 'Just now'}</span>
+              </div>
+              <div class="max-w-[90%] ${activeStyle} border text-on-surface rounded-2xl rounded-tl-xs px-3.5 py-2.5 shadow-xs">
+                <p class="text-sm font-medium leading-relaxed">${msg.text}</p>
+              </div>
+            </div>
+          `;
+        } else {
+          return `
+            <div class="flex flex-col gap-1 items-end w-full animate-fadeIn">
+              <div class="flex items-center gap-1.5 text-xs text-on-surface-variant pr-1">
+                <span class="text-[10px] text-outline font-mono">${msg.time || 'Just now'}</span>
+                <span class="font-bold text-primary">${msg.senderName || 'Deaf Person'}</span>
+                <span class="material-symbols-outlined text-[15px] text-primary">visibility</span>
+              </div>
+              <div class="max-w-[90%] bg-white border-2 border-primary/20 text-primary rounded-2xl rounded-tr-xs px-3.5 py-2.5 shadow-xs">
+                ${msg.rawSign ? `
+                  <div class="text-[10px] font-mono font-bold text-slate-500 mb-1 pb-1 border-b border-outline-variant/30 flex items-center gap-1">
+                    <span class="material-symbols-outlined text-[12px] text-slate-400">sign_language</span>
+                    <span>Recognized: <span class="text-emerald-700">${msg.rawSign}</span></span>
+                  </div>
+                ` : ''}
+                <p class="text-sm font-semibold leading-relaxed">"${msg.text}"</p>
+              </div>
+            </div>
+          `;
+        }
+      }).join('');
+
+      // Keep live signing indicator at bottom if active
+      const liveSigningIndicator = document.getElementById('live-signing-indicator');
+      chatTimeline.innerHTML = messagesHtml + (liveSigningIndicator ? liveSigningIndicator.outerHTML : '');
+      scrollToBottom();
+    }
+  });
+
+
+  // Listen for legacy incoming Admin messages via communicationService
+  const unsubComm = communicationService.on('ADMIN_MESSAGE_SENT', (payload) => {
+    if (payload && payload.text && !payload.hasSignResponse) {
+      applyGreenCameraState(false);
+
+      const msgId = payload.messageId || payload.id || payload.msgId;
+      const conv = conversationStore.getConversation();
+      const exists = conv.some(
+        (m) =>
+          (msgId && m.id === msgId) ||
+          (m.sender === 'admin' && m.text === payload.text && Math.abs((m.timestamp || 0) - (payload.timestamp || Date.now())) < 4000)
+      );
+      if (!exists) {
+        conversationStore.addMessage({
+          id: msgId,
+          sender: 'admin',
+          senderName: payload.senderName || 'Admin (Officer Vance)',
+          text: payload.text,
+          type: 'text',
+          isActiveReply: true,
+          mode: payload.mode || 'FINGERSPELLING',
+          timestamp: payload.timestamp
+        });
+      }
+
+      signAnimationService.playAnimationForMessage(payload.text, payload.mode || 'FINGERSPELLING');
+    }
+  });
+
+  // Subscribe to Hospital Conversation Service (dual updates: raw sign + contextual message)
+  const unsubHosp = hospitalConversationService.subscribe((hosp) => {
+    const transcriptEl = document.getElementById('deaf-live-transcript');
+    const rawSignEl = document.getElementById('deaf-live-transcript-raw-sign');
+
+    if (transcriptEl && hosp.currentPhrase) {
+      transcriptEl.innerHTML = `"${hosp.currentPhrase}" <span class="inline-block w-1.5 h-4 bg-secondary ml-1 animate-pulse align-middle"></span>`;
+    }
+    if (rawSignEl) {
+      rawSignEl.textContent = hosp.currentSign || '— (Template Selected)';
+    }
+  });
+
+  // Listen for demo reset across tabs
+  const unsubReset = communicationService.on('DEMO_RESET', () => {
+    applyGreenCameraState(false);
+    signAnimationService.stop();
+    signRecognitionService.reset();
+    hospitalConversationService.reset();
+  });
+
+  // Initial check on camera state
+  const currentAnim = signAnimationService.getState();
+  if (currentAnim.cameraResponseComplete) {
+    applyGreenCameraState(true);
+  }
+  scrollToBottom();
+
+  // TEARDOWN FUNCTION: Called when navigating away
+  return () => {
+    console.log('[CAMERA STOP TRACE] DeafPage component unmount/cleanup triggered', {
+      currentRoute: typeof window !== 'undefined' ? window.location.hash : 'unknown',
+      currentCameraState: cameraService.status,
+      timestamp: new Date().toISOString()
+    });
+
+    // Disconnect cleanly from WebSocket relay
+    communicationService.disconnect();
+
+    // Stop all active camera tracks so webcam light turns off
+    cameraService.stopCamera('deaf_page_unmount');
+    handTrackingDebugService.detach();
+    landmarkPipelineService.reset();
+    signRecognitionService.stopRecognition();
+    signAnimationService.stop();
+    signAnimationService.detachViewer();
+    signViewerInstance?.destroy();
+    unsubAnim();
+    unsubRecog();
+    unsubHosp();
+    unsubConv();
+    unsubComm();
+    unsubReset();
+  };
+}
